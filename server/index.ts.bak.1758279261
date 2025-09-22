@@ -1,0 +1,89 @@
+import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { registerRoutes } from './routes';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = process.env.PORT || 5001;
+
+// Middleware básico
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// CORS para desenvolvimento
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
+// Servir arquivos estáticos da pasta uploads
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Servir arquivos do frontend
+app.use(express.static(path.join(__dirname, '../dist/public')));
+
+// Registrar rotas da API
+try {
+  const apiRouter = registerRoutes();
+  if (apiRouter) {
+    app.use('/api', apiRouter);
+    console.log('✅ Rotas da API registradas com sucesso');
+  } else {
+    console.log('⚠️ Problema ao registrar rotas, continuando...');
+  }
+} catch (error) {
+  console.error('Erro ao registrar rotas:', error);
+}
+
+// Rota adicional para listar arquivos (para compatibilidade)
+app.get('/api/files-list', (req, res) => {
+  const fs = require('fs');
+  const uploadsPath = path.join(__dirname, '../uploads');
+  
+  try {
+    if (!fs.existsSync(uploadsPath)) {
+      return res.json([]);
+    }
+    
+    const files = fs.readdirSync(uploadsPath);
+    const fileList = files.map(filename => {
+      const filePath = path.join(uploadsPath, filename);
+      const stats = fs.statSync(filePath);
+      
+      return {
+        filename,
+        originalName: filename,
+        size: stats.size,
+        uploadDate: stats.mtime.toISOString(),
+        downloadUrl: `/uploads/${filename}`
+      };
+    });
+    
+    res.json(fileList);
+  } catch (error) {
+    console.error('Erro ao listar arquivos:', error);
+    res.status(500).json({ error: 'Erro ao listar arquivos' });
+  }
+});
+
+// Fallback para SPA
+app.get('*', (req, res) => {
+  const indexPath = path.join(__dirname, '../dist/public/index.html');
+  res.sendFile(indexPath);
+});
+
+// Iniciar servidor
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`📁 Arquivos estáticos servidos em: /uploads/`);
+  console.log(`🔗 Acesse: http://82.25.75.49:${PORT}/`);
+});

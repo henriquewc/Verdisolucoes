@@ -1,0 +1,117 @@
+import fs from 'fs';
+import path from 'path';
+
+// Carregar .env manualmente
+const envPath = path.join(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  const envContent = fs.readFileSync(envPath, 'utf8');
+  envContent.split('\n').forEach(line => {
+    const [key, value] = line.split('=');
+    if (key && value) {
+      process.env[key.trim()] = value.replace(/"/g, '').trim();
+    }
+  });
+  console.log('✅ .env carregado manualmente');
+}
+
+import express, { type Request, Response, NextFunction } from "express";
+import cookieParser from "cookie-parser";
+import { createServer } from "http";
+import { setupVite, serveStatic, log } from "./vite";
+
+const app = express();
+const server = createServer(app);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+
+// Log middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  const path = req.path;
+  let capturedJsonResponse: Record<string, any> | undefined = undefined;
+
+  const originalResJson = res.json;
+  res.json = function (bodyJson, ...args) {
+    capturedJsonResponse = bodyJson;
+    return originalResJson.apply(res, [bodyJson, ...args]);
+  };
+
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (path.startsWith("/api")) {
+      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
+      if (capturedJsonResponse) {
+        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+      }
+      if (logLine.length > 80) {
+        logLine = logLine.slice(0, 79) + "…";
+      }
+      log(logLine);
+    }
+  });
+
+  next();
+});
+
+(async () => {
+  console.log('🚀 Iniciando servidor...');
+  console.log('DATABASE_URL:', process.env.DATABASE_URL ? 'DEFINIDA' : 'NÃO DEFINIDA');
+  console.log('PORT:', process.env.PORT || 'NÃO DEFINIDA');
+  
+  // Rota de teste simples
+  app.get('/api/test', (req, res) => {
+    res.json({ message: 'API funcionando!', timestamp: new Date().toISOString() });
+  });
+
+  // Importar e registrar rotas dinamicamente
+  try {
+    const { registerRoutes } = await import('./routes');
+    const result = await registerRoutes(app);
+    
+    if (result && result.apiRouter) {
+      app.use("/api", result.apiRouter);
+      console.log('✅ Rotas da API registradas');
+    } else {
+      console.log('⚠️  Usando rotas básicas');
+    }
+  } catch (error) {
+    console.error('❌ Erro ao carregar rotas:', error);
+    console.log('⚠️  Continuando com rotas básicas');
+  }
+
+  // 404 para API
+  app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
+
+  // Error handler
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+    if (res.headersSent) return;
+    
+    const status = err.status || err.statusCode || 500;
+    const payload = { error: err.message || 'Erro interno' };
+    
+    if (req.path.startsWith('/api')) {
+      return res.status(status).json(payload);
+    }
+    
+    res.status(status).send(payload.error);
+  });
+
+  // Vite setup
+  if (app.get("env") === "development") {
+    await setupVite(app, server);
+  } else {
+    serveStatic(app);
+  }
+
+  const port = parseInt(process.env.PORT || '5001', 10);
+  server.listen({
+    port,
+    host: "0.0.0.0",
+    reusePort: true,
+  }, () => {
+    log(`serving on port ${port}`);
+    console.log(`🌐 Servidor rodando em http://0.0.0.0:${port}`);
+  });
+})();

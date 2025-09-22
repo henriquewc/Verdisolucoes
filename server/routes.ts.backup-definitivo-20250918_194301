@@ -1,0 +1,874 @@
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import { storage, ClientDocumentExistsError } from "./storage";
+import { 
+  insertClientSchema, insertActivitySchema, sanitizeClient,
+  insertCrmEtapaSchema, insertCrmLeadSchema, insertUsuarioSchema,
+  insertCrmHistoricoSchema, insertPropostaSchema,
+  insertPotenciaSchema, insertCidadeSchema, insertMargemSchema,
+  insertCondicaoPagamentoSchema, insertConfiguracaoSchema
+} from "@shared/schema";
+import { ZodError } from "zod";
+import { authMiddleware, adminMiddleware, generateAuthToken, setAuthCookie, clearAuthCookie, type AuthenticatedRequest } from "./middleware/auth";
+import { z } from "zod";
+import multer from "multer";
+import path from "path";
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: "/opt/atividades-crm/uploads",
+    filename: (req, file, cb) => {
+      const name = Date.now() + path.extname(file.originalname);
+      cb(null, name);
+    }
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }
+});
+
+// Schema para login
+const loginSchema = z.object({
+  username: z.string().min(1, "Usuário é obrigatório"),
+  password: z.string().min(1, "Senha é obrigatória"),
+});
+
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // === AUTENTICAÇÃO ENDPOINTS ===
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const { username, password } = loginSchema.parse(req.body);
+      
+      // Verificar credenciais hardcoded (sistema simples)
+      if (username === "admin" && password === "admin123") {
+        const user = {
+          id: "admin-001",
+          username: "admin",
+          isAdmin: true
+        };
+        
+        // Gerar token JWT e definir cookie seguro
+        const token = generateAuthToken(user);
+        setAuthCookie(res, token);
+        
+        // Log do login para auditoria
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[AUTH] Login realizado: ${username} em ${new Date().toISOString()}`);
+        }
+        
+        res.json({
+          success: true,
+          user: {
+            id: user.id,
+            username: user.username,
+            isAdmin: user.isAdmin
+          },
+          message: "Login realizado com sucesso"
+        });
+      } else {
+        // Log de tentativa de login inválida
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[AUTH] Tentativa de login inválida: ${username} em ${new Date().toISOString()}`);
+        }
+        
+        res.status(401).json({
+          error: "Usuário ou senha incorretos",
+          code: "INVALID_CREDENTIALS"
+        });
+      }
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro interno do servidor" });
+    }
+  });
+  
+  app.post("/api/auth/logout", authMiddleware, async (req, res) => {
+    const authenticatedReq = req as AuthenticatedRequest;
+    
+    // Log do logout para auditoria
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[AUTH] Logout realizado: ${authenticatedReq.user?.username} em ${new Date().toISOString()}`);
+    }
+    
+    // Limpar cookie de autenticação
+    clearAuthCookie(res);
+    
+    res.json({
+      success: true,
+      message: "Logout realizado com sucesso"
+    });
+  });
+  
+  app.get("/api/auth/me", authMiddleware, async (req, res) => {
+    const authenticatedReq = req as AuthenticatedRequest;
+    
+    res.json({
+      user: {
+        id: authenticatedReq.user?.id,
+        username: authenticatedReq.user?.username,
+        isAdmin: authenticatedReq.user?.isAdmin
+      }
+    });
+  });
+  // Clients routes
+  app.get("/api/clients", async (req, res) => {
+    try {
+      const clients = await storage.getAllClients();
+      const sanitizedClients = clients.map(client => sanitizeClient(client));
+      res.json(sanitizedClients);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar clientes" });
+    }
+  });
+
+  app.get("/api/clients/:id", async (req, res) => {
+    try {
+      const client = await storage.getClient(req.params.id);
+      if (!client) {
+        return res.status(404).json({ error: "Cliente não encontrado" });
+      }
+      res.json(sanitizeClient(client));
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar cliente" });
+    }
+  });
+
+  app.get("/api/clients/:id/activities", async (req, res) => {
+    try {
+      const activities = await storage.getActivitiesByClient(req.params.id);
+      res.json(activities);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar atividades do cliente" });
+    }
+  });
+
+  app.post("/api/clients", async (req, res) => {
+    let validatedData: any;
+    try {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Criando cliente:", req.body.nomeCompleto);
+      }
+      validatedData = insertClientSchema.parse(req.body);
+      const client = await storage.createClient(validatedData);
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Cliente criado:", client.id);
+      }
+      res.status(201).json(sanitizeClient(client));
+    } catch (error: any) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error("[DEBUG] ERRO DETALHADO ao criar cliente:", error);
+      }
+      
+      // Handle duplicate document error  
+      if (error instanceof ClientDocumentExistsError) {
+        const document = validatedData?.documento?.replace(/\D/g, '');
+        const documentType = document?.length === 11 ? 'CPF' : document?.length === 14 ? 'CNPJ' : 'documento';
+        return res.status(409).json({ 
+          error: `${documentType} já cadastrado no sistema`,
+          code: 'DOCUMENT_EXISTS'
+        });
+      }
+      
+      // Handle database constraint violations directly in routes as fallback
+      if (error?.code === '23505' && 
+          (error?.constraint?.includes('documento') || error?.constraint === 'clients_documento_unique')) {
+        const document = validatedData?.documento?.replace(/\D/g, '');
+        const documentType = document?.length === 11 ? 'CPF' : document?.length === 14 ? 'CNPJ' : 'documento';
+        return res.status(409).json({ 
+          error: `${documentType} já cadastrado no sistema`,
+          code: 'DOCUMENT_EXISTS'
+        });
+      }
+      
+      // Handle validation errors
+      if (error instanceof ZodError) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log("[DEBUG] Erro de validação:", error.issues);
+        }
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      
+      console.error("[ERROR] Erro ao criar cliente:", process.env.NODE_ENV === 'development' ? error : error.message);
+      res.status(500).json({ error: "Falha interna ao criar cliente" });
+    }
+  });
+
+  app.put("/api/clients/:id", async (req, res) => {
+    try {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Atualizando cliente:", req.params.id);
+      }
+      const validatedData = insertClientSchema.partial().parse(req.body);
+      const client = await storage.updateClient(req.params.id, validatedData);
+      if (!client) {
+        return res.status(404).json({ error: "Cliente não encontrado" });
+      }
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Cliente atualizado:", client.id);
+      }
+      res.json(sanitizeClient(client));
+    } catch (error: any) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error("[DEBUG] Erro ao atualizar cliente:", error);
+      }
+      
+      // Handle duplicate document error  
+      if (error instanceof ClientDocumentExistsError) {
+        const document = req.body?.documento?.replace(/\D/g, '');
+        const documentType = document?.length === 11 ? 'CPF' : document?.length === 14 ? 'CNPJ' : 'documento';
+        return res.status(409).json({ 
+          error: `${documentType} já cadastrado no sistema`,
+          code: 'DOCUMENT_EXISTS'
+        });
+      }
+      
+      // Handle database constraint violations
+      if (error?.code === '23505' && 
+          (error?.constraint?.includes('documento') || error?.constraint === 'clients_documento_unique')) {
+        const document = req.body?.documento?.replace(/\D/g, '');
+        const documentType = document?.length === 11 ? 'CPF' : document?.length === 14 ? 'CNPJ' : 'documento';
+        return res.status(409).json({ 
+          error: `${documentType} já cadastrado no sistema`,
+          code: 'DOCUMENT_EXISTS'
+        });
+      }
+      
+      // Handle validation errors
+      if (error instanceof ZodError) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log("[DEBUG] Erro de validação:", error.issues);
+        }
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      
+      console.error("[ERROR] Erro ao atualizar cliente:", process.env.NODE_ENV === 'development' ? error : error.message);
+      res.status(500).json({ error: "Falha interna ao atualizar cliente" });
+    }
+  });
+
+  // Activities routes
+  app.get("/api/activities", async (req, res) => {
+    try {
+      const activities = await storage.getAllActivities();
+      res.json(activities);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar atividades" });
+    }
+  });
+
+  app.get("/api/activities/:id", async (req, res) => {
+    try {
+      const activity = await storage.getActivity(req.params.id);
+      if (!activity) {
+        return res.status(404).json({ error: "Atividade não encontrada" });
+      }
+      res.json(activity);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar atividade" });
+    }
+  });
+
+  app.post("/api/activities", async (req, res) => {
+    try {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Criando atividade:", req.body.nome);
+      }
+      const validatedData = insertActivitySchema.parse(req.body);
+      const activity = await storage.createActivity(validatedData);
+      res.status(201).json(activity);
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error("[DEBUG] Erro na atividade:", error);
+      }
+      if (error instanceof ZodError) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log("[DEBUG] Issues:", error.issues);
+        }
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro interno ao criar atividade" });
+    }
+  });
+
+  app.post("/api/activities/:id/complete", async (req, res) => {
+    try {
+      const activity = await storage.completeActivity(req.params.id);
+      if (!activity) {
+        return res.status(404).json({ error: "Atividade não encontrada" });
+      }
+      res.json(activity);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao completar atividade" });
+    }
+  });
+
+  app.delete("/api/activities/:id", async (req, res) => {
+
+  // Upload de arquivos
+  app.post("/api/activities/:id/upload", authMiddleware, upload.array("files", 10), async (req, res) => {
+    try {
+      const files = req.files as Express.Multer.File[];
+      if (!files || files.length === 0) {
+        return res.status(400).json({ error: "Nenhum arquivo enviado" });
+      }
+      
+      const results = files.map(file => ({
+        fileName: file.originalname,
+        filePath: file.path,
+        size: file.size
+      }));
+      
+      res.json({ message: "Upload realizado", files: results });
+    } catch (error) {
+      res.status(500).json({ error: "Erro no upload" });
+    }
+  });
+    try {
+      await storage.deleteActivity(req.params.id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao deletar atividade" });
+    }
+  });
+
+  // === CRM ETAPAS ROUTES ===
+  app.get("/api/crm/etapas", async (req, res) => {
+    try {
+      const etapas = await storage.getAllCrmEtapas();
+      res.json(etapas);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar etapas do CRM" });
+    }
+  });
+
+  app.post("/api/crm/etapas", async (req, res) => {
+    try {
+      const validatedData = insertCrmEtapaSchema.parse(req.body);
+      const etapa = await storage.createCrmEtapa(validatedData);
+      res.status(201).json(etapa);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao criar etapa do CRM" });
+    }
+  });
+
+  // === CRM LEADS ROUTES ===
+  app.get("/api/crm/leads", async (req, res) => {
+    try {
+      const leads = await storage.getAllCrmLeads();
+      res.json(leads);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar leads do CRM" });
+    }
+  });
+
+  app.get("/api/crm/leads/:id", async (req, res) => {
+    try {
+      const lead = await storage.getCrmLead(req.params.id);
+      if (!lead) {
+        return res.status(404).json({ error: "Lead não encontrado" });
+      }
+      res.json(lead);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar lead" });
+    }
+  });
+
+  app.get("/api/crm/leads/etapa/:etapaId", async (req, res) => {
+    try {
+      const leads = await storage.getCrmLeadsByEtapa(parseInt(req.params.etapaId));
+      res.json(leads);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar leads da etapa" });
+    }
+  });
+
+  app.post("/api/crm/leads", async (req, res) => {
+    try {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Criando lead:", req.body.nomeCompleto);
+      }
+      const validatedData = insertCrmLeadSchema.parse(req.body);
+      const lead = await storage.createCrmLead(validatedData);
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Lead criado:", lead?.id);
+      }
+      res.status(201).json(lead);
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error("[DEBUG] Erro no lead:", error);
+      }
+      if (error instanceof ZodError) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log("[DEBUG] Issues:", error.issues);
+        }
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao criar lead" });
+    }
+  });
+
+  app.put("/api/crm/leads/:id", async (req, res) => {
+    try {
+      const validatedData = insertCrmLeadSchema.partial().parse(req.body);
+      const lead = await storage.updateCrmLead(req.params.id, validatedData);
+      if (!lead) {
+        return res.status(404).json({ error: "Lead não encontrado" });
+      }
+      res.json(lead);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao atualizar lead" });
+    }
+  });
+
+  app.post("/api/crm/leads/:id/move", async (req, res) => {
+    try {
+      const { novaEtapa, usuario, observacoes } = req.body;
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Movendo lead:", req.params.id, "para etapa:", novaEtapa, "usuario:", usuario);
+      }
+      
+      if (!novaEtapa || !usuario) {
+        return res.status(400).json({ error: "Nova etapa e usuário são obrigatórios" });
+      }
+      
+      const lead = await storage.moveCrmLeadToEtapa(req.params.id, novaEtapa, usuario, observacoes);
+      if (!lead) {
+        return res.status(404).json({ error: "Lead não encontrado" });
+      }
+      res.json(lead);
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error("[DEBUG] Erro ao mover lead:", error);
+      }
+      res.status(500).json({ error: "Erro ao mover lead" });
+    }
+  });
+
+  app.delete("/api/crm/leads/:id", async (req, res) => {
+    try {
+      await storage.deleteCrmLead(req.params.id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao deletar lead" });
+    }
+  });
+
+  // === CRM HISTÓRICO ROUTES ===
+  app.get("/api/crm/leads/:id/historico", async (req, res) => {
+    try {
+      const historico = await storage.getCrmHistoricoByLead(req.params.id);
+      res.json(historico);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar histórico do lead" });
+    }
+  });
+
+  // === CRM USUÁRIOS ROUTES ===
+  app.get("/api/crm/usuarios", async (req, res) => {
+    try {
+      const usuarios = await storage.getAllUsuarios();
+      res.json(usuarios);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar usuários" });
+    }
+  });
+
+  app.post("/api/crm/usuarios", async (req, res) => {
+    try {
+      const validatedData = insertUsuarioSchema.parse(req.body);
+      const usuario = await storage.createUsuario(validatedData);
+      res.status(201).json(usuario);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao criar usuário" });
+    }
+  });
+
+  // === CRM ESTATÍSTICAS ROUTES ===
+  app.get("/api/crm/statistics", async (req, res) => {
+    try {
+      const stats = await storage.getCrmStatistics();
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar estatísticas do CRM" });
+    }
+  });
+
+  // === CRM LEADS PERDIDOS ROUTES ===
+  app.post("/api/crm/leads/:id/perder", async (req, res) => {
+    try {
+      const { motivoPerda, usuario } = req.body;
+      if (!motivoPerda || !usuario) {
+        return res.status(400).json({ error: "Motivo da perda e usuário são obrigatórios" });
+      }
+      
+      await storage.createCrmLeadPerdido(req.params.id, motivoPerda, usuario);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao marcar lead como perdido" });
+    }
+  });
+
+  app.get("/api/crm/leads-perdidos", async (req, res) => {
+    try {
+      const leadsPerdidos = await storage.getCrmLeadsPerdidos();
+      res.json(leadsPerdidos);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar leads perdidos" });
+    }
+  });
+
+  // === CRM SEED DATA ROUTE ===
+  app.post("/api/crm/seed", async (req, res) => {
+    try {
+      await storage.seedCrmEtapas();
+      res.json({ message: "Dados padrão do CRM inseridos com sucesso" });
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao inserir dados padrão do CRM" });
+    }
+  });
+
+  // === PROPOSTAS ROUTES ===
+  app.get("/api/propostas", async (req, res) => {
+    try {
+      const propostas = await storage.getAllPropostas();
+      res.json(propostas);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar propostas" });
+    }
+  });
+
+  // === SPECIFIC ROUTES FIRST (before parameterized routes) ===
+  app.get("/api/propostas/statistics", async (req, res) => {
+    try {
+      const statistics = await storage.getPropostasStatistics();
+      res.json(statistics);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar estatísticas" });
+    }
+  });
+
+  // === CONFIGURAÇÕES ROUTES ===
+  app.get("/api/propostas/potencias", async (req, res) => {
+    try {
+      const potencias = await storage.getAllPotencias();
+      res.json(potencias);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar potências" });
+    }
+  });
+
+  app.get("/api/propostas/cidades", async (req, res) => {
+    try {
+      const cidades = await storage.getAllCidades();
+      res.json(cidades);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar cidades" });
+    }
+  });
+
+  app.get("/api/propostas/margens", async (req, res) => {
+    try {
+      const margens = await storage.getAllMargens();
+      res.json(margens);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar margens" });
+    }
+  });
+
+  app.get("/api/propostas/condicoes-pagamento", async (req, res) => {
+    try {
+      const condicoes = await storage.getAllCondicoesPagamento();
+      res.json(condicoes);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar condições de pagamento" });
+    }
+  });
+
+  // === PARAMETERIZED ROUTES LAST ===
+  app.get("/api/propostas/:id", async (req, res) => {
+    try {
+      const proposta = await storage.getProposta(req.params.id);
+      if (!proposta) {
+        return res.status(404).json({ error: "Proposta não encontrada" });
+      }
+      res.json(proposta);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar proposta" });
+    }
+  });
+
+  app.post("/api/propostas", async (req, res) => {
+    try {
+      const validatedData = insertPropostaSchema.parse(req.body);
+      const proposta = await storage.createProposta(validatedData);
+      res.status(201).json(proposta);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ 
+          error: "Dados inválidos", 
+          issues: error.errors 
+        });
+      }
+      res.status(500).json({ error: "Erro ao criar proposta" });
+    }
+  });
+
+  app.put("/api/propostas/:id", async (req, res) => {
+    try {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("[DEBUG] Atualizando proposta:", req.params.id, "com dados:", req.body);
+      }
+      const validatedData = insertPropostaSchema.partial().parse(req.body);
+      const proposta = await storage.updateProposta(req.params.id, validatedData);
+      if (!proposta) {
+        return res.status(404).json({ error: "Proposta não encontrada" });
+      }
+      res.json(proposta);
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error("[DEBUG] Erro ao atualizar proposta:", error);
+      }
+      if (error instanceof ZodError) {
+        return res.status(400).json({ 
+          error: "Dados inválidos", 
+          issues: error.errors 
+        });
+      }
+      res.status(500).json({ error: "Erro ao atualizar proposta" });
+    }
+  });
+
+  app.delete("/api/propostas/:id", async (req, res) => {
+    try {
+      const success = await storage.deleteProposta(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Proposta não encontrada" });
+      }
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao excluir proposta" });
+    }
+  });
+
+  // === POTÊNCIAS CRUD ===
+  app.post("/api/propostas/potencias", async (req, res) => {
+    try {
+      const validatedData = insertPotenciaSchema.parse(req.body);
+      const potencia = await storage.createPotencia(validatedData);
+      res.status(201).json(potencia);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao criar potência" });
+    }
+  });
+
+  app.put("/api/propostas/potencias/:id", async (req, res) => {
+    try {
+      const validatedData = insertPotenciaSchema.partial().parse(req.body);
+      const potencia = await storage.updatePotencia(req.params.id, validatedData);
+      if (!potencia) {
+        return res.status(404).json({ error: "Potência não encontrada" });
+      }
+      res.json(potencia);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao atualizar potência" });
+    }
+  });
+
+  app.delete("/api/propostas/potencias/:id", async (req, res) => {
+    try {
+      const success = await storage.deletePotencia(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Potência não encontrada" });
+      }
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao excluir potência" });
+    }
+  });
+
+  // === CIDADES CRUD ===
+  app.post("/api/propostas/cidades", async (req, res) => {
+    try {
+      const validatedData = insertCidadeSchema.parse(req.body);
+      const cidade = await storage.createCidade(validatedData);
+      res.status(201).json(cidade);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao criar cidade" });
+    }
+  });
+
+  app.put("/api/propostas/cidades/:id", async (req, res) => {
+    try {
+      const validatedData = insertCidadeSchema.partial().parse(req.body);
+      const cidade = await storage.updateCidade(req.params.id, validatedData);
+      if (!cidade) {
+        return res.status(404).json({ error: "Cidade não encontrada" });
+      }
+      res.json(cidade);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao atualizar cidade" });
+    }
+  });
+
+  app.delete("/api/propostas/cidades/:id", async (req, res) => {
+    try {
+      const success = await storage.deleteCidade(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Cidade não encontrada" });
+      }
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao excluir cidade" });
+    }
+  });
+
+  // === MARGENS CRUD ===
+  app.post("/api/propostas/margens", async (req, res) => {
+    try {
+      const validatedData = insertMargemSchema.parse(req.body);
+      const margem = await storage.createMargem(validatedData);
+      res.status(201).json(margem);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao criar margem" });
+    }
+  });
+
+  app.put("/api/propostas/margens/:id", async (req, res) => {
+    try {
+      const validatedData = insertMargemSchema.partial().parse(req.body);
+      const margem = await storage.updateMargem(req.params.id, validatedData);
+      if (!margem) {
+        return res.status(404).json({ error: "Margem não encontrada" });
+      }
+      res.json(margem);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao atualizar margem" });
+    }
+  });
+
+  app.delete("/api/propostas/margens/:id", async (req, res) => {
+    try {
+      const success = await storage.deleteMargem(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Margem não encontrada" });
+      }
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao excluir margem" });
+    }
+  });
+
+  // === CONDIÇÕES DE PAGAMENTO CRUD ===
+  app.post("/api/propostas/condicoes-pagamento", async (req, res) => {
+    try {
+      const validatedData = insertCondicaoPagamentoSchema.parse(req.body);
+      const condicao = await storage.createCondicaoPagamento(validatedData);
+      res.status(201).json(condicao);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao criar condição de pagamento" });
+    }
+  });
+
+  app.put("/api/propostas/condicoes-pagamento/:id", async (req, res) => {
+    try {
+      const validatedData = insertCondicaoPagamentoSchema.partial().parse(req.body);
+      const condicao = await storage.updateCondicaoPagamento(req.params.id, validatedData);
+      if (!condicao) {
+        return res.status(404).json({ error: "Condição de pagamento não encontrada" });
+      }
+      res.json(condicao);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao atualizar condição de pagamento" });
+    }
+  });
+
+  app.delete("/api/propostas/condicoes-pagamento/:id", async (req, res) => {
+    try {
+      const success = await storage.deleteCondicaoPagamento(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Condição de pagamento não encontrada" });
+      }
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao excluir condição de pagamento" });
+    }
+  });
+
+  // === CONFIGURAÇÕES GERAIS CRUD (PROTEGIDAS) ===
+  app.get("/api/configuracoes", authMiddleware, async (req, res) => {
+    try {
+      const configuracoes = await storage.getAllConfiguracoes();
+      res.json(configuracoes);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar configurações" });
+    }
+  });
+
+  app.get("/api/configuracoes/:chave", authMiddleware, async (req, res) => {
+    try {
+      const configuracao = await storage.getConfiguracao(req.params.chave);
+      if (!configuracao) {
+        return res.status(404).json({ error: "Configuração não encontrada" });
+      }
+      res.json(configuracao);
+    } catch (error) {
+      res.status(500).json({ error: "Erro ao buscar configuração" });
+    }
+  });
+
+  app.post("/api/configuracoes", adminMiddleware, async (req, res) => {
+    try {
+      const validatedData = insertConfiguracaoSchema.parse(req.body);
+      const configuracao = await storage.setConfiguracao(validatedData);
+      
+      // Log da alteração de configuração para auditoria
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[CONFIG] Configuração ${validatedData.chave} alterada para: ${validatedData.valor}`);
+      }
+      
+      res.status(201).json(configuracao);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ error: "Dados inválidos", issues: error.issues });
+      }
+      res.status(500).json({ error: "Erro ao salvar configuração" });
+    }
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+}

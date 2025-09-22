@@ -1,0 +1,99 @@
+import express from 'express';
+import path from 'path';
+import { registerRoutes } from './routes';
+
+const app = express();
+const PORT = process.env.PORT || 5001;
+
+// Middleware básico
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Servir arquivos estáticos da pasta uploads
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Servir arquivos do frontend
+app.use(express.static(path.join(__dirname, '../dist')));
+
+// Registrar rotas da API
+try {
+  const apiRouter = registerRoutes();
+  if (apiRouter) {
+    app.use('/api', apiRouter);
+    console.log('✅ Rotas da API registradas com sucesso');
+  } else {
+    console.log('⚠️ Continuando com rotas básicas');
+    
+    // Rotas básicas de fallback
+    app.post('/api/auth/login', (req, res) => {
+      const { username, password } = req.body;
+      if (username === 'admin' && password === 'admin123') {
+        res.json({
+          success: true,
+          user: { id: 'admin-001', username: 'admin', isAdmin: true },
+          message: 'Login realizado com sucesso'
+        });
+      } else {
+        res.status(401).json({ success: false, message: 'Credenciais inválidas' });
+      }
+    });
+  }
+} catch (error) {
+  console.error('Erro ao registrar rotas:', error);
+}
+
+// Rota para listar arquivos da pasta uploads
+app.get('/api/files-list', (req, res) => {
+  const fs = require('fs');
+  const uploadsPath = path.join(__dirname, '../uploads');
+  
+  try {
+    if (!fs.existsSync(uploadsPath)) {
+      return res.json([]);
+    }
+    
+    const files = fs.readdirSync(uploadsPath);
+    const fileList = files.map(filename => {
+      const filePath = path.join(uploadsPath, filename);
+      const stats = fs.statSync(filePath);
+      
+      return {
+        filename,
+        originalName: filename,
+        size: stats.size,
+        uploadDate: stats.mtime.toISOString(),
+        downloadUrl: `/uploads/${filename}`
+      };
+    });
+    
+    res.json(fileList);
+  } catch (error) {
+    console.error('Erro ao listar arquivos:', error);
+    res.status(500).json({ error: 'Erro ao listar arquivos' });
+  }
+});
+
+// Rota para download direto de arquivos
+app.get('/uploads/:filename', (req, res) => {
+  const filename = req.params.filename;
+  const filePath = path.join(__dirname, '../uploads', filename);
+  
+  const fs = require('fs');
+  if (fs.existsSync(filePath)) {
+    res.download(filePath);
+  } else {
+    res.status(404).json({ error: 'Arquivo não encontrado' });
+  }
+});
+
+// Fallback para SPA
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../dist/index.html'));
+});
+
+// Iniciar servidor
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`📁 Arquivos estáticos servidos em: /uploads/`);
+  console.log(`🔗 Acesse: http://82.25.75.49:${PORT}/uploads/`);
+});
