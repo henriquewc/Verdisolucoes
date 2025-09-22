@@ -1,0 +1,22 @@
+
+> rest-express@1.0.0 dev
+> NODE_ENV=development tsx server/index.ts
+
+✅ .env carregado manualmente
+🚀 Iniciando servidor...
+DATABASE_URL: DEFINIDA
+PORT: 5001
+⚠️  Usando rotas básicas
+7:55:00 PM [express] serving on port 5001
+🌐 Servidor rodando em http://0.0.0.0:5001
+Browserslist: browsers data (caniuse-lite) is 11 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+7:55:05 PM [express] GET /api/auth/me 200 in 4ms :: {"user":{"id":"admin-001","username":"admin","is…
+7:55:05 PM [express] GET /api/clients 304 in 21ms :: [{"id":"a1b59884-a306-45cd-8a01-bcee97d31fb5","…
+7:55:05 PM [express] GET /api/activities 304 in 19ms :: [{"id":"6edf72f5-0ab1-4b40-ab6b-fae18cbb017f…
+[AUTH] Login realizado: admin em 2025-09-18T19:55:09.976Z
+7:55:09 PM [express] POST /api/auth/login 200 in 4ms :: {"success":true,"user":{"id":"admin-001","us…
+7:55:09 PM [express] POST /api/activities/6edf72f5-0ab1-4b40-ab6b-fae18cbb017f/upload 200 in 7ms :: …

@@ -1,0 +1,14 @@
+[0;1;31m×[0m nginx.service - A high performance web server and a reverse proxy server
+     Loaded: loaded (/lib/systemd/system/nginx.service; enabled; vendor preset: enabled)
+     Active: [0;1;31mfailed[0m (Result: signal) since Mon 2025-09-22 00:05:23 UTC; 12h ago
+       Docs: man:nginx(8)
+   Main PID: 361791 (code=killed, signal=KILL)
+        CPU: 364ms
+
+Sep 21 13:48:04 verdi systemd[1]: Starting A high performance web server and a reverse proxy server...
+Sep 21 13:48:04 verdi systemd[1]: Started A high performance web server and a reverse proxy server.
+Sep 22 00:05:23 verdi systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mnginx.service: Main process exited, code=killed, status=9/KILL[0m
+Sep 22 00:05:23 verdi systemd[1]: [0;1;39m[0;1;31m[0;1;39mnginx.service: Killing process 361793 (nginx) with signal SIGKILL.[0m
+Sep 22 00:05:23 verdi systemd[1]: [0;1;39m[0;1;31m[0;1;39mnginx.service: Killing process 361793 (nginx) with signal SIGKILL.[0m
+Sep 22 00:05:23 verdi systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mnginx.service: Failed with result 'signal'.[0m
+Sep 22 00:05:23 verdi systemd[1]: nginx.service: Unit process 361793 (nginx) remains running after unit stopped.

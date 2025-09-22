@@ -1,0 +1,9 @@
+nohup: ignoring input
+
+> rest-express@1.0.0 dev
+> NODE_ENV=development tsx server/index.ts
+
+✅ Rotas da API registradas com sucesso
+🚀 Servidor rodando na porta 8080
+📁 Arquivos estáticos servidos em: /uploads/
+🔗 Acesse: http://82.25.75.49:8080/
